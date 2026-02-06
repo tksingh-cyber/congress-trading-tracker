@@ -88,37 +88,44 @@ def load_and_process_data():
     bt_df = bt_df.merge(politician_rank[["skill_score"]], left_on="Politician", right_index=True, how="left")
     df = df.merge(politician_rank[["skill_score"]], left_on="Politician", right_index=True, how="left")
     
+    # BALANCED SWEET SPOT for backtested trades
     def final_signal(r):
         score = 0
+        # Signal strength
         if r["signal_strength"]=="HIGH": score += 3
-        elif r["signal_strength"]=="MEDIUM": score += 1
+        elif r["signal_strength"]=="MEDIUM": score += 2
+        # Politician quality (more generous)
         if pd.notna(r.get("skill_score")):
-            if r["skill_score"] > 25: score += 3
-            elif r["skill_score"] > 15: score += 2
-            elif r["skill_score"] > 5: score += 1
+            if r["skill_score"] > 20: score += 2
+            elif r["skill_score"] > 10: score += 1
+        # Historical returns (more generous)
         if pd.notna(r.get("return_90d")):
-            if r["return_90d"] > 10: score += 2
-            elif r["return_90d"] > 5: score += 1
-        if score >= 7: return "STRONG BUY"
-        if score >= 5: return "BUY"
-        if score >= 3: return "WATCH"
+            if r["return_90d"] > 8: score += 2
+            elif r["return_90d"] > 3: score += 1
+        # Rating (balanced thresholds)
+        if score >= 6: return "STRONG BUY"
+        if score >= 4: return "BUY"
+        if score >= 2: return "WATCH"
         return "IGNORE"
     
     bt_df["final_signal"] = bt_df.apply(final_signal, axis=1)
     
+    # BALANCED for ALL trades (live feed)
     def final_signal_all(r):
         score = 0
+        # Signal strength
         if r["signal_strength"]=="HIGH": score += 3
-        elif r["signal_strength"]=="MEDIUM": score += 1
+        elif r["signal_strength"]=="MEDIUM": score += 2
+        # Politician quality
         if pd.notna(r.get("skill_score")):
-            if r["skill_score"] > 25: score += 3
-            elif r["skill_score"] > 15: score += 2
-            elif r["skill_score"] > 5: score += 1
+            if r["skill_score"] > 20: score += 2
+            elif r["skill_score"] > 10: score += 1
+        # Transaction type
         if r["transaction_type"]=="Purchase": score += 1
-        else: score -= 1
-        if score >= 7: return "STRONG BUY"
-        if score >= 5: return "BUY"
-        if score >= 3: return "WATCH"
+        # Rating
+        if score >= 6: return "STRONG BUY"
+        if score >= 4: return "BUY"
+        if score >= 2: return "WATCH"
         return "IGNORE"
     
     df["final_signal"] = df.apply(final_signal_all, axis=1)
@@ -147,10 +154,10 @@ st.write(f"Showing {len(live_feed)} of {len(df)} trades")
 
 signal_dist = live_feed['final_signal'].value_counts()
 col1, col2, col3, col4 = st.columns(4)
-col1.metric("STRONG BUY", signal_dist.get("STRONG BUY", 0))
-col2.metric("BUY", signal_dist.get("BUY", 0))
-col3.metric("WATCH", signal_dist.get("WATCH", 0))
-col4.metric("IGNORE", signal_dist.get("IGNORE", 0))
+col1.metric("STRONG BUY", signal_dist.get("STRONG BUY", 0), delta="🔥")
+col2.metric("BUY", signal_dist.get("BUY", 0), delta="📈")
+col3.metric("WATCH", signal_dist.get("WATCH", 0), delta="👀")
+col4.metric("IGNORE", signal_dist.get("IGNORE", 0), delta="❌")
 
 st.dataframe(live_feed[["Politician", "Ticker", "transaction_type", "amount_range", "Party", "Chamber", "skill_score", "signal_strength", "final_signal", "DisclosureDate"]], use_container_width=True, hide_index=True)
 
@@ -185,7 +192,7 @@ if not portfolio.empty:
     st.dataframe(portfolio[["Ticker","name","signal_count","skill_score","return_90d","price","allocation_£","shares"]], use_container_width=True, hide_index=True)
     st.plotly_chart(px.pie(portfolio, values='allocation_£', names='Ticker', title='Portfolio', hole=0.3), use_container_width=True)
 else:
-    st.warning("No STRONG BUY signals yet")
+    st.warning("No STRONG BUY signals currently available")
 
 st.markdown("---")
 st.header("Politician Performance")
