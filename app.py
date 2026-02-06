@@ -1,380 +1,124 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import requests
 import yfinance as yf
 from datetime import datetime, timedelta
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 st.set_page_config(page_title="Congress Trading Tracker", layout="wide", page_icon="🏛️")
 
-# Custom CSS
-st.markdown("""
-    <style>
-    .big-font {
-        font-size:50px !important;
-        font-weight: bold;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-# API Configuration
 API_KEY = st.secrets.get("QUIVER_API_KEY", "3e58cb4de846a54998b70a3775f6cff2f25ead56")
-HEADERS = {
-    "Authorization": f"Bearer {API_KEY}",
-    "Accept": "application/json"
-}
+EMAIL_USER = st.secrets.get("EMAIL_USER", "")
+EMAIL_PASS = st.secrets.get("EMAIL_PASS", "")
+EMAIL_TO = st.secrets.get("EMAIL_TO", "")
+HEADERS = {"Authorization": f"Bearer {API_KEY}", "Accept": "application/json"}
 
-# Load and process data
-@st.cache_data(ttl=3600)  # Cache for 1 hour
-def load_and_process_data():
+def send_email_alert(df):
+    if df.empty or not EMAIL_USER: return False
+    msg = MIMEMultipart()
+    msg["From"], msg["To"], msg["Subject"] = EMAIL_USER, EMAIL_TO, "🔥 Congress Alerts"
+    msg.attach(MIMEText(f"<h2>Alerts</h2>{df.to_html(index=False)}", "html"))
     try:
-        # Fetch House trades
-        house_url = "https://api.quiverquant.com/beta/live/congresstrading"
-        house_response = requests.get(house_url, headers=HEADERS, timeout=30)
-        
-        # Fetch Senate trades
-        senate_url = "https://api.quiverquant.com/beta/live/senatetrading"
-        senate_response = requests.get(senate_url, headers=HEADERS, timeout=30)
-        
-        if house_response.status_code != 200:
-            st.error(f"House API returned status code: {house_response.status_code}")
-            st.stop()
-            
-        if senate_response.status_code != 200:
-            st.error(f"Senate API returned status code: {senate_response.status_code}")
-            st.stop()
-        
-        # Combine both datasets
-        house_data = pd.DataFrame(house_response.json())
-        senate_data = pd.DataFrame(senate_response.json())
-        
-        house_data['Chamber'] = 'House'
-        senate_data['Chamber'] = 'Senate'
-        
-        df = pd.concat([house_data, senate_data], ignore_index=True)
-        
-        if len(df) == 0:
-            st.error("No data returned from API")
-            st.stop()
-            
-    except Exception as e:
-        st.error(f"Error fetching data: {str(e)}")
-        st.stop()
-    
-    # Clean data
-    df_clean = df[[
-        "Representative",
-        "Chamber",
-        "Party",
-        "Ticker",
-        "Transaction",
-        "Range",
-        "TransactionDate",
-        "ReportDate"
-    ]].copy()
-    
-    df_clean.rename(columns={
-        "Representative": "Politician",
-        "Transaction": "transaction_type",
-        "Range": "amount_range",
-        "ReportDate": "DisclosureDate"
-    }, inplace=True)
-    
-    # Clean dates
-    df_clean['DisclosureDate'] = pd.to_datetime(df_clean['DisclosureDate'], errors='coerce')
-    df_clean['TransactionDate'] = pd.to_datetime(df_clean['TransactionDate'], errors='coerce')
-    df_clean = df_clean.dropna(subset=['DisclosureDate'])
-    df_clean = df_clean[df_clean['DisclosureDate'] < datetime.now()]
-    df_clean = df_clean.dropna(subset=['Ticker'])
-    df_clean = df_clean[df_clean['Ticker'] != '']
-    
-    # Signal strength
-    def signal_strength(row):
-        score = 0
-        if row["transaction_type"] == "Purchase":
-            score += 2
-        if "$15,000" in str(row["amount_range"]) or "$50,000" in str(row["amount_range"]):
-            score += 2
-        if row["Chamber"] == "Senate":
-            score += 1
-        if score >= 4:
-            return "HIGH"
-        elif score >= 2:
-            return "MEDIUM"
-        else:
-            return "LOW"
-    
-    df_clean["signal_strength"] = df_clean.apply(signal_strength, axis=1)
-    
-    # Allocation
-    def allocation(signal):
-        if signal == "HIGH":
-            return "5–10%"
-        if signal == "MEDIUM":
-            return "2–4%"
-        return "Avoid"
-    
-    df_clean["suggested_allocation"] = df_clean["signal_strength"].apply(allocation)
-    
-    # Backtest ALL purchases
-    def backtest_trade(ticker, disclosure_date):
-        try:
-            start = pd.to_datetime(disclosure_date)
-            end = start + timedelta(days=370)
-            prices = yf.download(ticker, start=start, end=end, progress=False)
-            if prices.empty:
-                return None
-            entry = float(prices.iloc[0]["Close"])
-            results = {}
-            for days in [30, 90, 180, 365]:
-                idx = min(days, len(prices)-1)
-                exit_price = float(prices.iloc[idx]["Close"])
-                results[f"return_{days}d"] = round((exit_price - entry) / entry * 100, 2)
-            return results
-        except:
-            return None
-    
-    rows = []
-    # PROCESS ALL PURCHASES (NO LIMIT)
-    purchases = df_clean[df_clean["transaction_type"] == "Purchase"]
-    
-    st.write(f"📊 Found {len(purchases)} purchase trades to backtest...")
-    
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    for idx, (i, row) in enumerate(purchases.iterrows()):
-        try:
-            res = backtest_trade(row["Ticker"], row["DisclosureDate"])
-            if res:
-                row_dict = {
-                    "Politician": row["Politician"],
-                    "Chamber": row["Chamber"],
-                    "Party": row["Party"],
-                    "Ticker": row["Ticker"],
-                    "transaction_type": row["transaction_type"],
-                    "amount_range": row["amount_range"],
-                    "TransactionDate": row["TransactionDate"],
-                    "DisclosureDate": row["DisclosureDate"],
-                    "signal_strength": row["signal_strength"],
-                    "suggested_allocation": row["suggested_allocation"],
-                    **res
-                }
-                rows.append(row_dict)
-        except:
-            continue
-        
-        # Update progress every 10 trades to improve performance
-        if idx % 10 == 0 or idx == len(purchases) - 1:
-            progress_bar.progress((idx + 1) / len(purchases))
-            status_text.text(f"Processing trade {idx + 1} of {len(purchases)}... ({len(rows)} successful)")
-    
-    progress_bar.empty()
-    status_text.empty()
-    
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(EMAIL_USER, EMAIL_PASS)
+            server.send_message(msg)
+        return True
+    except: return False
+
+def ultimate_backtest(ticker, disclosure_date):
+    try:
+        start = pd.to_datetime(disclosure_date)
+        prices = yf.download(ticker, start=start, end=start+timedelta(days=370), progress=False)
+        if prices.empty: return None
+        entry = float(prices.iloc[0]["Close"])
+        results = {"entry_price": round(entry, 2)}
+        for days in [7,14,30,60,90,180,365]:
+            idx = min(days, len(prices)-1)
+            results[f"return_{days}d"] = round((float(prices.iloc[idx]["Close"]) - entry) / entry * 100, 2)
+        results["max_gain_%"] = round((prices["Close"].max() - entry) / entry * 100, 2)
+        results["max_drawdown_%"] = round((prices["Close"].min() - entry) / entry * 100, 2)
+        return results
+    except: return None
+
+def politician_performance_analysis(bt_df):
+    stats = bt_df.groupby("Politician").agg({"return_90d":["mean","median","count"],"return_180d":["mean","median"],"return_365d":["mean","median"],"max_gain_%":"max","max_drawdown_%":"min"}).round(2)
+    stats.columns = ['_'.join(c).strip() for c in stats.columns.values]
+    stats["skill_score"] = (stats["return_90d_mean"]*0.2 + stats["return_180d_mean"]*0.4 + stats["return_365d_mean"]*0.3 + stats["max_gain_%_max"]*0.1).round(2)
+    stats["win_rate_%"] = bt_df.groupby("Politician").apply(lambda x: (x["return_90d"]>0).sum()/len(x)*100).round(1)
+    stats["total_trades"] = stats["return_90d_count"]
+    return stats.sort_values("skill_score", ascending=False)
+
+@st.cache_data(ttl=3600)
+def load_and_process_data():
+    house = requests.get("https://api.quiverquant.com/beta/live/congresstrading", headers=HEADERS, timeout=30)
+    senate = requests.get("https://api.quiverquant.com/beta/live/senatetrading", headers=HEADERS, timeout=30)
+    if house.status_code!=200 or senate.status_code!=200: st.error("API Error"); st.stop()
+    df = pd.concat([pd.DataFrame(house.json()).assign(Chamber="House"), pd.DataFrame(senate.json()).assign(Chamber="Senate")])
+    df = df[["Representative","Chamber","Party","Ticker","Transaction","Range","TransactionDate","ReportDate"]].copy()
+    df.rename(columns={"Representative":"Politician","Transaction":"transaction_type","Range":"amount_range","ReportDate":"DisclosureDate"}, inplace=True)
+    df["DisclosureDate"] = pd.to_datetime(df["DisclosureDate"], errors="coerce")
+    df = df.dropna(subset=["Ticker","DisclosureDate"])
+    df = df[df["DisclosureDate"]<datetime.now()]
+    df = df[df["Ticker"]!=""]
+    df["signal_strength"] = df.apply(lambda r: "HIGH" if (2 if r["transaction_type"]=="Purchase" else 0)+(2 if "$50,000" in str(r["amount_range"]) else 0)+(1 if r["Chamber"]=="Senate" else 0)>=4 else ("MEDIUM" if (2 if r["transaction_type"]=="Purchase" else 0)+(2 if "$50,000" in str(r["amount_range"]) else 0)>=2 else "LOW"), axis=1)
+    purchases = df[df["transaction_type"]=="Purchase"]
+    st.info(f"🔄 Backtesting {len(purchases)} trades...")
+    rows, progress_bar, status_text = [], st.progress(0), st.empty()
+    for idx,(i,row) in enumerate(purchases.iterrows()):
+        res = ultimate_backtest(row["Ticker"], row["DisclosureDate"])
+        if res: rows.append({**row.to_dict(), **res})
+        if idx%10==0: progress_bar.progress((idx+1)/len(purchases)); status_text.text(f"{idx+1}/{len(purchases)}")
+    progress_bar.empty(); status_text.empty()
     bt_df = pd.DataFrame(rows)
-    
-    if len(bt_df) == 0:
-        st.error("No trades could be backtested")
-        st.stop()
-    
-    st.success(f"✅ Successfully backtested {len(bt_df)} trades!")
-    
-    # Politician rankings
-    politician_rank = (
-        bt_df.groupby("Politician")[["return_90d", "return_180d", "return_365d"]]
-        .mean()
-        .dropna()
-    )
-    
-    politician_rank["skill_score"] = (
-        politician_rank["return_90d"] * 0.3 +
-        politician_rank["return_180d"] * 0.4 +
-        politician_rank["return_365d"] * 0.3
-    )
-    
-    politician_rank = politician_rank.sort_values("skill_score", ascending=False)
-    
-    # Merge skill scores
-    bt_df = bt_df.merge(politician_rank["skill_score"], on="Politician", how="left")
-    
-    # Final signal
-    def final_signal(row):
-        score = 0
-        if row["signal_strength"] == "HIGH":
-            score += 2
-        if pd.notna(row["skill_score"]) and row["skill_score"] > 20:
-            score += 2
-        if pd.notna(row["return_90d"]) and row["return_90d"] > 10:
-            score += 1
-        if score >= 4:
-            return "STRONG BUY"
-        elif score >= 3:
-            return "BUY"
-        elif score >= 2:
-            return "WATCH"
-        else:
-            return "IGNORE"
-    
-    bt_df["final_signal"] = bt_df.apply(final_signal, axis=1)
-    
-    # Top 5
-    top_5 = (
-        bt_df[bt_df["final_signal"].isin(["STRONG BUY", "BUY"])]
-        .sort_values("skill_score", ascending=False)
-        .groupby("Ticker")
-        .first()
-        .reset_index()
-        .head(5)
-    )
-    
-    return top_5, politician_rank, bt_df
+    if len(bt_df)==0: st.error("No trades"); st.stop()
+    politician_rank = politician_performance_analysis(bt_df)
+    bt_df = bt_df.merge(politician_rank[["skill_score"]], left_on="Politician", right_index=True, how="left")
+    bt_df["final_signal"] = bt_df.apply(lambda r: "STRONG BUY" if (3 if r["signal_strength"]=="HIGH" else 0)+(2 if pd.notna(r["skill_score"]) and r["skill_score"]>30 else 0)+(2 if r.get("return_90d",0)>15 else 0)>=5 else ("BUY" if (3 if r["signal_strength"]=="HIGH" else 0)+(2 if pd.notna(r["skill_score"]) and r["skill_score"]>30 else 0)>=4 else ("WATCH" if (3 if r["signal_strength"]=="HIGH" else 0)>=2 else "IGNORE")), axis=1)
+    return df, bt_df, politician_rank
 
-# Header
-st.markdown('<p class="big-font">🏛️ Congress Trading Intelligence</p>', unsafe_allow_html=True)
-st.markdown("### Track and analyze congressional stock trades in real-time")
-st.info("⏱️ Loading fresh data... This may take 5-10 minutes for complete analysis")
+st.title("🏛️ Congress Trading Intelligence")
+df, bt_df, politician_rank = load_and_process_data()
+st.success(f"✅ Analyzed {len(bt_df)} trades from {len(politician_rank)} politicians!")
 
-# Load data
-top_5, politician_rank, bt_df = load_and_process_data()
-
-st.success("✅ Data fully updated!")
-
-# Key Metrics Row
-col1, col2, col3, col4 = st.columns(4)
-
-with col1:
-    st.metric("Total Trades Analyzed", len(bt_df))
-    
-with col2:
-    strong_buys = len(bt_df[bt_df['final_signal'] == 'STRONG BUY'])
-    st.metric("Strong Buy Signals", strong_buys)
-    
-with col3:
-    avg_return = bt_df['return_180d'].mean()
-    st.metric("Avg 180-Day Return", f"{avg_return:.2f}%")
-    
-with col4:
-    top_politicians = len(politician_rank)
-    st.metric("Politicians Tracked", top_politicians)
+col1,col2,col3,col4 = st.columns(4)
+col1.metric("Total Trades", len(bt_df))
+col2.metric("Strong Buys", len(bt_df[bt_df['final_signal']=='STRONG BUY']))
+col3.metric("Avg 180d Return", f"{bt_df['return_180d'].mean():.2f}%")
+col4.metric("Top Trader", politician_rank.index[0][:20] if len(politician_rank)>0 else "N/A")
 
 st.markdown("---")
-
-# TOP 5 OPPORTUNITIES
-st.markdown("## 🔥 Top 5 Investment Opportunities")
-st.markdown("*Highest conviction trades from best-performing politicians*")
-
-if len(top_5) > 0:
-    top_5_display = top_5[[
-        'Politician', 'Ticker', 'Party', 'amount_range', 
-        'skill_score', 'return_90d', 'return_180d', 
-        'final_signal', 'suggested_allocation'
-    ]].copy()
-
-    top_5_display.columns = [
-        'Politician', 'Ticker', 'Party', 'Amount', 
-        'Skill Score', '90d Return %', '180d Return %', 
-        'Signal', 'Allocation'
-    ]
-
-    st.dataframe(top_5_display, use_container_width=True, hide_index=True)
-else:
-    st.warning("No strong buy/buy signals found")
+st.header("🧺 Auto Portfolio Builder")
+portfolio_value = st.number_input("Portfolio value (£)", min_value=50, value=200, step=50)
+strong = bt_df[bt_df["final_signal"]=="STRONG BUY"]
+portfolio = strong.groupby("Ticker").agg({"skill_score":"mean","return_90d":"mean","Politician":"count"}).rename(columns={"Politician":"signal_count"}).sort_values("skill_score",ascending=False).head(10).reset_index()
+if not portfolio.empty:
+    portfolio["weight"] = portfolio["skill_score"]/portfolio["skill_score"].sum()
+    portfolio["allocation_£"] = (portfolio["weight"]*portfolio_value).round(2)
+    def get_info(t):
+        try: s=yf.Ticker(t); return {"price":round(s.history(period="5d")["Close"].iloc[-1],2),"name":s.info.get('longName',t)[:30]}
+        except: return {"price":None,"name":t}
+    portfolio = pd.concat([portfolio, portfolio["Ticker"].apply(get_info).apply(pd.Series)], axis=1)
+    portfolio["shares"] = (portfolio["allocation_£"]/portfolio["price"]).fillna(0).astype(int)
+    st.dataframe(portfolio[["Ticker","name","signal_count","skill_score","return_90d","price","allocation_£","shares"]], use_container_width=True, hide_index=True)
+    st.plotly_chart(px.pie(portfolio, values='allocation_£', names='Ticker', title='Portfolio', hole=0.3), use_container_width=True)
 
 st.markdown("---")
-
-# POLITICIAN LEADERBOARD
-st.markdown("## 🏆 Politician Leaderboard")
-
-col1, col2 = st.columns([2, 1])
-
-with col1:
-    top_10 = politician_rank.head(10).reset_index()
-    top_10.columns = ['Politician', '90d Avg', '180d Avg', '365d Avg', 'Skill Score']
-    st.dataframe(top_10, use_container_width=True, hide_index=True)
-
-with col2:
-    fig = px.bar(
-        top_10.head(5),
-        x='Skill Score',
-        y='Politician',
-        orientation='h',
-        title="Top 5 by Skill Score",
-        color='Skill Score',
-        color_continuous_scale='Blues'
-    )
-    fig.update_layout(showlegend=False, height=400)
-    st.plotly_chart(fig, use_container_width=True)
+st.header("🏆 Politician Performance")
+top10 = politician_rank.head(10).reset_index()
+st.dataframe(top10[["Politician","skill_score","win_rate_%","total_trades","return_90d_mean","return_180d_mean","return_365d_mean","max_gain_%_max"]], use_container_width=True, hide_index=True)
 
 st.markdown("---")
+st.header("🔥 Top 5 Opportunities")
+top5 = bt_df[bt_df["final_signal"].isin(["STRONG BUY","BUY"])].sort_values("skill_score",ascending=False).groupby("Ticker").first().reset_index().head(5)
+if len(top5)>0: st.dataframe(top5[['Politician','Ticker','Party','Chamber','amount_range','skill_score','return_90d','return_180d','return_365d','max_gain_%','final_signal','DisclosureDate']], use_container_width=True, hide_index=True)
 
-# SIGNAL DISTRIBUTION
-st.markdown("## 📊 Signal Distribution")
+st.header("📧 Email Alerts")
+if st.button("Send STRONG BUY Alerts"):
+    if send_email_alert(strong[["Politician","Ticker","amount_range","skill_score","return_90d"]]): st.success("✅ Sent!")
+    else: st.warning("⚠️ Email not configured")
 
-col1, col2 = st.columns(2)
-
-with col1:
-    signal_counts = bt_df['final_signal'].value_counts()
-    fig = px.pie(values=signal_counts.values, names=signal_counts.index, 
-                 title="Trade Signals Breakdown",
-                 color_discrete_sequence=px.colors.sequential.RdBu)
-    st.plotly_chart(fig, use_container_width=True)
-
-with col2:
-    party_counts = bt_df['Party'].value_counts()
-    fig = px.bar(x=party_counts.index, y=party_counts.values, 
-                 title="Trades by Party", 
-                 labels={'x': 'Party', 'y': 'Number of Trades'},
-                 color=party_counts.index,
-                 color_discrete_map={'Republican': '#FF4B4B', 'Democrat': '#4B4BFF'})
-    st.plotly_chart(fig, use_container_width=True)
-
-st.markdown("---")
-
-# FILTERS & FULL DATA
-st.markdown("## 🔍 Explore All Trades")
-
-col1, col2, col3 = st.columns(3)
-
-with col1:
-    signal_filter = st.multiselect(
-        "Filter by Signal",
-        options=bt_df['final_signal'].unique(),
-        default=bt_df['final_signal'].unique()
-    )
-
-with col2:
-    party_filter = st.multiselect(
-        "Filter by Party",
-        options=bt_df['Party'].unique(),
-        default=bt_df['Party'].unique()
-    )
-
-with col3:
-    min_return = st.slider(
-        "Min 180d Return %",
-        float(bt_df['return_180d'].min()),
-        float(bt_df['return_180d'].max()),
-        float(bt_df['return_180d'].min())
-    )
-
-filtered_df = bt_df[
-    (bt_df['final_signal'].isin(signal_filter)) &
-    (bt_df['Party'].isin(party_filter)) &
-    (bt_df['return_180d'] >= min_return)
-]
-
-st.write(f"Showing {len(filtered_df)} trades")
-
-st.dataframe(
-    filtered_df[[
-        'Politician', 'Ticker', 'Party', 'transaction_type',
-        'amount_range', 'skill_score', 'return_90d', 'return_180d',
-        'final_signal', 'suggested_allocation'
-    ]],
-    use_container_width=True,
-    hide_index=True
-)
-
-st.markdown("---")
-st.markdown(f"*Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC. Data cached for 1 hour.*")
+st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')} UTC")
