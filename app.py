@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import requests
 import yfinance as yf
 from datetime import datetime, timedelta
@@ -87,7 +86,27 @@ def load_and_process_data():
     if len(bt_df)==0: st.error("No trades"); st.stop()
     politician_rank = politician_performance_analysis(bt_df)
     bt_df = bt_df.merge(politician_rank[["skill_score"]], left_on="Politician", right_index=True, how="left")
-    bt_df["final_signal"] = bt_df.apply(lambda r: "STRONG BUY" if (3 if r["signal_strength"]=="HIGH" else 0)+(2 if pd.notna(r.get("skill_score")) and r["skill_score"]>30 else 0)+(2 if pd.notna(r.get("return_90d")) and r["return_90d"]>15 else 0)>=5 else ("BUY" if (3 if r["signal_strength"]=="HIGH" else 0)+(2 if pd.notna(r.get("skill_score")) and r["skill_score"]>30 else 0)>=4 else ("WATCH" if (3 if r["signal_strength"]=="HIGH" else 0)>=2 else "IGNORE")), axis=1)
+    
+    # RELAXED CRITERIA - More realistic
+    def final_signal(r):
+        score = 0
+        # High signal strength
+        if r["signal_strength"]=="HIGH": score += 3
+        elif r["signal_strength"]=="MEDIUM": score += 1
+        
+        # Good politician (lowered from 30 to 15)
+        if pd.notna(r.get("skill_score")) and r["skill_score"]>15: score += 2
+        
+        # Positive returns (lowered from 15% to 5%)
+        if pd.notna(r.get("return_90d")) and r["return_90d"]>5: score += 2
+        
+        # Rating system
+        if score >= 5: return "STRONG BUY"
+        if score >= 3: return "BUY"
+        if score >= 1: return "WATCH"
+        return "IGNORE"
+    
+    bt_df["final_signal"] = bt_df.apply(final_signal, axis=1)
     df["final_signal"] = df.apply(lambda r: "BUY" if r["signal_strength"]=="HIGH" and r["transaction_type"]=="Purchase" else ("WATCH" if r["signal_strength"]=="MEDIUM" and r["transaction_type"]=="Purchase" else "IGNORE"), axis=1)
     return df, bt_df, politician_rank
 
@@ -142,7 +161,7 @@ if not portfolio.empty:
     st.dataframe(portfolio[["Ticker","name","signal_count","skill_score","return_90d","price","allocation_£","shares"]], use_container_width=True, hide_index=True)
     st.plotly_chart(px.pie(portfolio, values='allocation_£', names='Ticker', title='Portfolio', hole=0.3), use_container_width=True)
 else:
-    st.warning("No STRONG BUY signals")
+    st.warning("No STRONG BUY signals yet. Try lowering the portfolio builder threshold.")
 
 st.markdown("---")
 st.header("Politician Performance")
@@ -152,10 +171,11 @@ st.markdown("---")
 st.header("Top 5 Opportunities")
 top5 = bt_df[bt_df["final_signal"].isin(["STRONG BUY","BUY"])].sort_values("skill_score",ascending=False).groupby("Ticker").first().reset_index().head(5)
 if len(top5)>0: st.dataframe(top5[['Politician','Ticker','Party','Chamber','amount_range','skill_score','return_90d','return_180d','return_365d','max_gain_%','final_signal','DisclosureDate']], use_container_width=True, hide_index=True)
+else: st.warning("No strong opportunities. Market conditions or politician performance may not meet criteria.")
 
 st.header("Email Alerts")
 if st.button("Send STRONG BUY Alerts"):
     if send_email_alert(strong[["Politician","Ticker","amount_range","skill_score","return_90d"]]): st.success("Sent!")
     else: st.warning("Email not configured")
 
-st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')} UTC | Auto-updates every hour")
+st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')} UTC | Auto-updates hourly")
