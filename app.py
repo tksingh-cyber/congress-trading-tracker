@@ -39,16 +39,26 @@ def ultimate_backtest(ticker, disclosure_date):
         for days in [7,14,30,60,90,180,365]:
             idx = min(days, len(prices)-1)
             results[f"return_{days}d"] = round((float(prices.iloc[idx]["Close"]) - entry) / entry * 100, 2)
-        results["max_gain_%"] = round((prices["Close"].max() - entry) / entry * 100, 2)
-        results["max_drawdown_%"] = round((prices["Close"].min() - entry) / entry * 100, 2)
+        results["max_gain_%"] = round((float(prices["Close"].max()) - entry) / entry * 100, 2)
+        results["max_drawdown_%"] = round((float(prices["Close"].min()) - entry) / entry * 100, 2)
         return results
     except: return None
 
 def politician_performance_analysis(bt_df):
-    stats = bt_df.groupby("Politician").agg({"return_90d":["mean","median","count"],"return_180d":["mean","median"],"return_365d":["mean","median"],"max_gain_%":"max","max_drawdown_%":"min"}).round(2)
+    # Convert columns to numeric first
+    for col in ["return_90d", "return_180d", "return_365d", "max_gain_%", "max_drawdown_%"]:
+        bt_df[col] = pd.to_numeric(bt_df[col], errors='coerce')
+    
+    stats = bt_df.groupby("Politician").agg({
+        "return_90d":["mean","median","count"],
+        "return_180d":["mean","median"],
+        "return_365d":["mean","median"],
+        "max_gain_%":"max",
+        "max_drawdown_%":"min"
+    }).round(2)
     stats.columns = ['_'.join(c).strip() for c in stats.columns.values]
     stats["skill_score"] = (stats["return_90d_mean"]*0.2 + stats["return_180d_mean"]*0.4 + stats["return_365d_mean"]*0.3 + stats["max_gain_%_max"]*0.1).round(2)
-    stats["win_rate_%"] = bt_df.groupby("Politician").apply(lambda x: (x["return_90d"]>0).sum()/len(x)*100).round(1)
+    stats["win_rate_%"] = bt_df.groupby("Politician").apply(lambda x: (x["return_90d"]>0).sum()/len(x)*100 if len(x)>0 else 0).round(1)
     stats["total_trades"] = stats["return_90d_count"]
     return stats.sort_values("skill_score", ascending=False)
 
@@ -77,7 +87,7 @@ def load_and_process_data():
     if len(bt_df)==0: st.error("No trades"); st.stop()
     politician_rank = politician_performance_analysis(bt_df)
     bt_df = bt_df.merge(politician_rank[["skill_score"]], left_on="Politician", right_index=True, how="left")
-    bt_df["final_signal"] = bt_df.apply(lambda r: "STRONG BUY" if (3 if r["signal_strength"]=="HIGH" else 0)+(2 if pd.notna(r["skill_score"]) and r["skill_score"]>30 else 0)+(2 if r.get("return_90d",0)>15 else 0)>=5 else ("BUY" if (3 if r["signal_strength"]=="HIGH" else 0)+(2 if pd.notna(r["skill_score"]) and r["skill_score"]>30 else 0)>=4 else ("WATCH" if (3 if r["signal_strength"]=="HIGH" else 0)>=2 else "IGNORE")), axis=1)
+    bt_df["final_signal"] = bt_df.apply(lambda r: "STRONG BUY" if (3 if r["signal_strength"]=="HIGH" else 0)+(2 if pd.notna(r.get("skill_score")) and r["skill_score"]>30 else 0)+(2 if pd.notna(r.get("return_90d")) and r["return_90d"]>15 else 0)>=5 else ("BUY" if (3 if r["signal_strength"]=="HIGH" else 0)+(2 if pd.notna(r.get("skill_score")) and r["skill_score"]>30 else 0)>=4 else ("WATCH" if (3 if r["signal_strength"]=="HIGH" else 0)>=2 else "IGNORE")), axis=1)
     return df, bt_df, politician_rank
 
 st.title("🏛️ Congress Trading Intelligence")
@@ -105,6 +115,8 @@ if not portfolio.empty:
     portfolio["shares"] = (portfolio["allocation_£"]/portfolio["price"]).fillna(0).astype(int)
     st.dataframe(portfolio[["Ticker","name","signal_count","skill_score","return_90d","price","allocation_£","shares"]], use_container_width=True, hide_index=True)
     st.plotly_chart(px.pie(portfolio, values='allocation_£', names='Ticker', title='Portfolio', hole=0.3), use_container_width=True)
+else:
+    st.warning("No STRONG BUY signals yet")
 
 st.markdown("---")
 st.header("🏆 Politician Performance")
