@@ -65,8 +65,6 @@ def load_and_process_data():
     df = df.dropna(subset=["Ticker","DisclosureDate"])
     df = df[df["DisclosureDate"]<datetime.now()]
     df = df[df["Ticker"]!=""]
-    
-    # Calculate basic signal strength
     def calc_signal_strength(r):
         score = 0
         if r["transaction_type"]=="Purchase": score += 2
@@ -75,10 +73,7 @@ def load_and_process_data():
         if score >= 4: return "HIGH"
         if score >= 2: return "MEDIUM"
         return "LOW"
-    
     df["signal_strength"] = df.apply(calc_signal_strength, axis=1)
-    
-    # Backtest purchases
     purchases = df[df["transaction_type"]=="Purchase"]
     st.info(f"Backtesting {len(purchases)} trades...")
     rows, progress_bar, status_text = [], st.progress(0), st.empty()
@@ -89,47 +84,44 @@ def load_and_process_data():
     progress_bar.empty(); status_text.empty()
     bt_df = pd.DataFrame(rows)
     if len(bt_df)==0: st.error("No trades"); st.stop()
-    
-    # Get politician rankings
     politician_rank = politician_performance_analysis(bt_df)
-    
-    # Merge skill scores into backtested data
     bt_df = bt_df.merge(politician_rank[["skill_score"]], left_on="Politician", right_index=True, how="left")
-    
-    # ALSO merge skill scores into ALL trades (for live feed)
     df = df.merge(politician_rank[["skill_score"]], left_on="Politician", right_index=True, how="left")
     
-    # Calculate final signal for backtested trades
     def final_signal(r):
         score = 0
         if r["signal_strength"]=="HIGH": score += 3
         elif r["signal_strength"]=="MEDIUM": score += 1
-        if pd.notna(r.get("skill_score")) and r["skill_score"]>15: score += 2
-        if pd.notna(r.get("return_90d")) and r["return_90d"]>5: score += 2
-        if score >= 5: return "STRONG BUY"
-        if score >= 3: return "BUY"
-        if score >= 1: return "WATCH"
+        if pd.notna(r.get("skill_score")):
+            if r["skill_score"] > 25: score += 3
+            elif r["skill_score"] > 15: score += 2
+            elif r["skill_score"] > 5: score += 1
+        if pd.notna(r.get("return_90d")):
+            if r["return_90d"] > 10: score += 2
+            elif r["return_90d"] > 5: score += 1
+        if score >= 7: return "STRONG BUY"
+        if score >= 5: return "BUY"
+        if score >= 3: return "WATCH"
         return "IGNORE"
     
     bt_df["final_signal"] = bt_df.apply(final_signal, axis=1)
     
-    # Calculate final signal for ALL trades (including live feed)
     def final_signal_all(r):
         score = 0
         if r["signal_strength"]=="HIGH": score += 3
         elif r["signal_strength"]=="MEDIUM": score += 1
-        # Use politician skill score if available
-        if pd.notna(r.get("skill_score")) and r["skill_score"]>15: score += 2
-        # Bonus for purchases
+        if pd.notna(r.get("skill_score")):
+            if r["skill_score"] > 25: score += 3
+            elif r["skill_score"] > 15: score += 2
+            elif r["skill_score"] > 5: score += 1
         if r["transaction_type"]=="Purchase": score += 1
-        
-        if score >= 5: return "STRONG BUY"
-        if score >= 3: return "BUY"
-        if score >= 1: return "WATCH"
+        else: score -= 1
+        if score >= 7: return "STRONG BUY"
+        if score >= 5: return "BUY"
+        if score >= 3: return "WATCH"
         return "IGNORE"
     
     df["final_signal"] = df.apply(final_signal_all, axis=1)
-    
     return df, bt_df, politician_rank
 
 st.title("Congress Trading Intelligence")
@@ -138,13 +130,13 @@ df, bt_df, politician_rank = load_and_process_data()
 st.success(f"Analyzed {len(bt_df)} trades from {len(politician_rank)} politicians!")
 
 st.header("Live Congress Trading Feed")
-st.markdown("*Enhanced with politician skill scores for better signals*")
+st.markdown("*Balanced signal ratings with politician skill scores*")
 
 col1, col2, col3, col4 = st.columns(4)
 with col1:
-    signal_filter = st.multiselect("Signal", ["STRONG BUY", "BUY", "WATCH", "IGNORE"], default=["STRONG BUY", "BUY", "WATCH"])
+    signal_filter = st.multiselect("Signal", ["STRONG BUY", "BUY", "WATCH", "IGNORE"], default=["STRONG BUY", "BUY", "WATCH", "IGNORE"])
 with col2:
-    transaction_filter = st.multiselect("Transaction", df['transaction_type'].unique(), default=["Purchase"])
+    transaction_filter = st.multiselect("Transaction", df['transaction_type'].unique(), default=df['transaction_type'].unique())
 with col3:
     party_filter = st.multiselect("Party", df['Party'].unique(), default=df['Party'].unique())
 with col4:
@@ -152,11 +144,19 @@ with col4:
 
 live_feed = df[(df['final_signal'].isin(signal_filter)) & (df['transaction_type'].isin(transaction_filter)) & (df['Party'].isin(party_filter)) & (df['Chamber'].isin(chamber_filter))].sort_values("DisclosureDate", ascending=False).head(100)
 st.write(f"Showing {len(live_feed)} of {len(df)} trades")
-st.dataframe(live_feed[["Politician", "Ticker", "transaction_type", "amount_range", "Party", "Chamber", "skill_score", "signal_strength", "final_signal", "DisclosureDate"]], use_container_width=True, hide_index=True, column_config={"skill_score": st.column_config.NumberColumn("Politician Score", format="%.2f")})
+
+signal_dist = live_feed['final_signal'].value_counts()
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("STRONG BUY", signal_dist.get("STRONG BUY", 0))
+col2.metric("BUY", signal_dist.get("BUY", 0))
+col3.metric("WATCH", signal_dist.get("WATCH", 0))
+col4.metric("IGNORE", signal_dist.get("IGNORE", 0))
+
+st.dataframe(live_feed[["Politician", "Ticker", "transaction_type", "amount_range", "Party", "Chamber", "skill_score", "signal_strength", "final_signal", "DisclosureDate"]], use_container_width=True, hide_index=True)
 
 col1, col2 = st.columns(2)
 with col1:
-    fig = px.pie(live_feed['final_signal'].value_counts(), values=live_feed['final_signal'].value_counts().values, names=live_feed['final_signal'].value_counts().index, title="Signal Distribution", hole=0.3, color_discrete_sequence=['#00ff00', '#90EE90', '#FFD700', '#FFB6C1'])
+    fig = px.pie(signal_dist, values=signal_dist.values, names=signal_dist.index, title="Signal Distribution", hole=0.3, color_discrete_map={"STRONG BUY": "#00ff00", "BUY": "#90EE90", "WATCH": "#FFD700", "IGNORE": "#FF6B6B"})
     st.plotly_chart(fig, use_container_width=True)
 with col2:
     fig = px.bar(x=live_feed['Party'].value_counts().index, y=live_feed['Party'].value_counts().values, title="Trades by Party", color=live_feed['Party'].value_counts().index, color_discrete_map={'Republican': '#FF4B4B', 'Democrat': '#4B4BFF'})
@@ -164,7 +164,7 @@ with col2:
 
 st.markdown("---")
 col1,col2,col3,col4 = st.columns(4)
-col1.metric("Total Trades Backtested", len(bt_df))
+col1.metric("Total Backtested", len(bt_df))
 col2.metric("Strong Buys", len(bt_df[bt_df['final_signal']=='STRONG BUY']))
 col3.metric("Avg 180d Return", f"{bt_df['return_180d'].mean():.2f}%")
 col4.metric("Top Trader", politician_rank.index[0][:20] if len(politician_rank)>0 else "N/A")
@@ -185,7 +185,7 @@ if not portfolio.empty:
     st.dataframe(portfolio[["Ticker","name","signal_count","skill_score","return_90d","price","allocation_£","shares"]], use_container_width=True, hide_index=True)
     st.plotly_chart(px.pie(portfolio, values='allocation_£', names='Ticker', title='Portfolio', hole=0.3), use_container_width=True)
 else:
-    st.warning("No STRONG BUY signals yet. Try lowering criteria or check back after market activity.")
+    st.warning("No STRONG BUY signals yet")
 
 st.markdown("---")
 st.header("Politician Performance")
@@ -195,7 +195,6 @@ st.markdown("---")
 st.header("Top 5 Opportunities")
 top5 = bt_df[bt_df["final_signal"].isin(["STRONG BUY","BUY"])].sort_values("skill_score",ascending=False).groupby("Ticker").first().reset_index().head(5)
 if len(top5)>0: st.dataframe(top5[['Politician','Ticker','Party','Chamber','amount_range','skill_score','return_90d','return_180d','return_365d','max_gain_%','final_signal','DisclosureDate']], use_container_width=True, hide_index=True)
-else: st.warning("No strong opportunities found.")
 
 st.header("Email Alerts")
 if st.button("Send STRONG BUY Alerts"):
